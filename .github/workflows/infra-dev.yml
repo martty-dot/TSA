@@ -1,1 +1,124 @@
 # GitHub Actions Workflow für Dev-Infrastruktur
+name: Dev Infra - Lint, Validate & Deploy
+
+on:
+  push:
+    branches: [ dev ]
+  pull_request:
+    branches: [ dev ]
+  workflow_dispatch: {}
+
+jobs:
+  cfn-lint-and-validate:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # 1) cfn-lint: strukturelle & Best-Practice-Checks für CFN-Templates
+      #    (cfn-lint ist das Standardtool von AWS für diesen Zweck) 
+      - name: Install cfn-lint
+        run: |
+          pip install cfn-lint
+
+      - name: Run cfn-lint on dev template
+        run: |
+          cfn-lint infra/dev/template.yaml
+
+      # 2) validate-template: serverseitige Syntax-/Strukturprüfung durch CloudFormation 
+      - name: Configure AWS credentials (dev) for validation
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_DEV }}
+          aws-region: ${{ secrets.AWS_REGION }}
+          # OIDC wird von dieser Action unterstützt und empfohlen 
+          role-session-name: github-actions-cfn-validate
+
+      - name: Validate template via CloudFormation
+        run: |
+          aws cloudformation validate-template \
+            --template-body file://infra/dev/template.yaml
+
+  deploy-dev:
+    needs: cfn-lint-and-validate
+    runs-on: ubuntu-latest
+    # nur bei push auf dev deployen, nicht bei PR
+    if: github.event_name == 'push'
+
+    env:
+      STACK_NAME: ts-forecast-dev
+      PROJECT_NAME: ts-forecast
+      INFERENCE_PIPELINE_NAME: ts-forecast-dev-inference
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (dev) for deploy
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_DEV }}
+          aws-region: ${{ secrets.AWS_REGION }}
+          role-session-name: github-actions-cfn-deploy
+
+      - name: Deploy dev CloudFormation stack
+        run: |
+          aws cloudformation deploy \
+            --template-file infra/dev/template.yaml \
+            --stack-name "$STACK_NAME" \
+            --parameter-overrides \
+                ProjectName="$PROJECT_NAME" \
+                InferencePipelineName="$INFERENCE_PIPELINE_NAME" \
+            --capabilities CAPABILITY_NAMED_IAM
+
+  smoke-test-dev:
+    needs: deploy-dev
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push'
+
+    env:
+      PROJECT_NAME: ts-forecast
+
+    steps:
+      - name: Configure AWS credentials (dev) for smoke test
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_DEV }}
+          aws-region: ${{ secrets.AWS_REGION }}
+          role-session-name: github-actions-smoke-test
+
+      - name: Smoke test S3 buckets
+        run: |
+          DATA_BUCKET="${PROJECT_NAME}-dev-data-${AWS_ACCOUNT_ID:-$(aws sts get-caller-identity --query Account --output text)}-${AWS_REGION}"
+          MLFLOW_BUCKET="${PROJECT_NAME}-dev-mlflow-${AWS_ACCOUNT_ID:-$(aws sts get-caller-identity --query Account --output text)}-${AWS_REGION}"
+
+          echo "Checking data bucket: $DATA_BUCKET"
+          aws s3api head-bucket --bucket "$DATA_BUCKET"
+
+          echo "Checking mlflow bucket: $MLFLOW_BUCKET"
+          aws s3api head-bucket --bucket "$MLFLOW_BUCKET"
+
+      - name: Smoke test inference Lambda (dry_run)
+        run: |
+          LAMBDA_NAME="${PROJECT_NAME}-dev-inference-trigger"
+          aws lambda invoke \
+            --function-name "$LAMBDA_NAME" \
+            --payload '{"dry_run": true}' \
+            --cli-binary-format raw-in-base64-out \
+            /tmp/lambda-response.json
+
+          cat /tmp/lambda-response.json
+
+      - name: Smoke test EventBridge rule wired to Lambda
+        run: |
+          RULE_NAME="${PROJECT_NAME}-dev-inference-weekly"
+          LAMBDA_NAME="${PROJECT_NAME}-dev-inference-trigger"
+          LAMBDA_ARN=$(aws lambda get-function --function-name "$LAMBDA_NAME" --query 'Configuration.FunctionArn' --output text)
+
+          echo "Checking rule $RULE_NAME targets..."
+          TARGETS_JSON=$(aws events list-targets-by-rule --rule "$RULE_NAME")
+          echo "$TARGETS_JSON"
+
+          # Fail if Lambda ARN not found in targets
+          echo "$TARGETS_JSON" | grep -q "$LAMBDA_ARN"
