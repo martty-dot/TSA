@@ -1,14 +1,14 @@
 name: AWS Connection Test
 
 on:
-  workflow_dispatch   # manuell triggerbar in GitHub Actions UI
+  workflow_dispatch:
 
 jobs:
   test-connection:
     runs-on: ubuntu-latest
 
     permissions:
-      id-token: write      # wichtig für OIDC
+      id-token: write     
       contents: read
 
     steps:
