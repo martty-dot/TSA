@@ -1,0 +1,31 @@
+name: AWS Connection Test
+
+on:
+  workflow_dispatch: {}  # manuell triggerbar in GitHub Actions UI
+
+jobs:
+  test-connection:
+    runs-on: ubuntu-latest
+
+    permissions:
+      id-token: write      # wichtig für OIDC
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_DEV }}
+          aws-region: ${{ secrets.AWS_REGION }}
+          role-session-name: github-actions-connection-test
+
+      - name: Who am I in AWS? (sts get-caller-identity)
+        run: |
+          aws sts get-caller-identity
+
+      - name: Optional: list S3 buckets
+        run: |
+          aws s3 ls
