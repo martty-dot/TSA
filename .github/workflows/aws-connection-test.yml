@@ -1,6 +1,7 @@
 name: AWS Connection Test
 
 on:
+  push:
   workflow_dispatch:
 
 jobs:
