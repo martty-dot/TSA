@@ -1,7 +1,7 @@
 name: AWS Connection Test
 
 on:
-  workflow_dispatch: {}  # manuell triggerbar in GitHub Actions UI
+  workflow_dispatch:   # manuell triggerbar in GitHub Actions UI
 
 jobs:
   test-connection:
