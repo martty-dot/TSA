@@ -47,6 +47,8 @@ jobs:
           aws cloudformation validate-template \
             --template-body file://infra/dev/template.yaml
 
+
+
   deploy-dev:
     needs: cfn-lint-and-validate
     runs-on: ubuntu-latest
@@ -68,6 +70,22 @@ jobs:
           role-to-assume: ${{ secrets.AWS_ROLE_DEV }}
           aws-region: ${{ secrets.AWS_REGION }}
           role-session-name: github-actions-cfn-deploy
+
+      - name: If stack is ROLLBACK_COMPLETE, delete it first
+        run: |
+          set -e
+          STATUS=$(aws cloudformation describe-stacks \
+            --stack-name "$STACK_NAME" \
+            --query 'Stacks[0].StackStatus' \
+            --output text 2>/dev/null || echo "NOT_FOUND")
+
+          echo "Current stack status: $STATUS"
+
+          if [ "$STATUS" = "ROLLBACK_COMPLETE" ]; then
+            echo "Deleting stack $STACK_NAME (ROLLBACK_COMPLETE) ..."
+            aws cloudformation delete-stack --stack-name "$STACK_NAME"
+            aws cloudformation wait stack-delete-complete --stack-name "$STACK_NAME"
+          fi
 
       - name: Deploy dev CloudFormation stack
         run: |
