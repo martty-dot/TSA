@@ -3,10 +3,17 @@ name: Dev Infra - Lint, Validate & Deploy
 
 on:
   push:
-    branches: [ dev ]
+    branches: [ dev ] 
+    paths:
+      - "infra/**"
+      - ".github/workflows/infra-dev.yml"
   pull_request:
     branches: [ dev ]
   workflow_dispatch: 
+
+permissions:
+  id-token: write
+  contents: read
 
 jobs:
   cfn-lint-and-validate:
@@ -44,7 +51,7 @@ jobs:
     needs: cfn-lint-and-validate
     runs-on: ubuntu-latest
     # nur bei push auf dev deployen, nicht bei PR
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
 
     env:
       STACK_NAME: ts-forecast-dev
@@ -75,7 +82,7 @@ jobs:
   smoke-test-dev:
     needs: deploy-dev
     runs-on: ubuntu-latest
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
 
     env:
       PROJECT_NAME: ts-forecast
