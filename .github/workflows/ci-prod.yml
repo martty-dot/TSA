@@ -1,1 +1,12 @@
 # GitHub Actions Workflow für Prod-Tests und HPO-Pipeline
+# Does nothing for now
+name: Placeholder (TODO)
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  noop:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Placeholder workflow - TODO"
