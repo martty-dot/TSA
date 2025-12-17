@@ -1,1 +1,8 @@
 # CloudFormation Template für Prod
+# Empty for now
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Placeholder template (no-op for now)
+
+Resources:
+  NullResource:
+    Type: AWS::CloudFormation::WaitConditionHandle

@@ -1,1 +1,200 @@
 # CloudFormation Template für Dev
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Dev-Infrastruktur für ts-forecast (inkl. Lambda-Trigger für Inferenz-Pipeline)
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: ts-forecast
+
+  # Name der SageMaker-Pipeline, die wöchentlich gestartet werden soll
+  InferencePipelineName:
+    Type: String
+    Description: Name der SageMaker Inferenz-Pipeline (Dev)
+
+Resources:
+  # --------------------------------------------------------------------------
+  # S3-Buckets
+  # --------------------------------------------------------------------------
+
+  DevDataBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${ProjectName}-dev-data-${AWS::AccountId}-${AWS::Region}'
+      VersioningConfiguration:
+        Status: Enabled
+
+  MlflowArtifactsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${ProjectName}-dev-mlflow-${AWS::AccountId}-${AWS::Region}'
+      VersioningConfiguration:
+        Status: Enabled
+
+  # --------------------------------------------------------------------------
+  # CodeCommit-Repository (z.B. für DVC + Pipelines)
+  # --------------------------------------------------------------------------
+
+  DevCodeRepo:
+    Type: AWS::CodeCommit::Repository
+    Properties:
+      RepositoryName: !Sub '${ProjectName}-dev-code'
+      RepositoryDescription: 'Code + DVC-Metadaten + Pipelines für Dev-Umgebung'
+
+  # --------------------------------------------------------------------------
+  # IAM-Execution-Role für SageMaker Pipelines
+  # --------------------------------------------------------------------------
+
+  SageMakerPipelineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-dev-sagemaker-pipeline-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - sagemaker.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSageMakerFullAccess
+        - arn:aws:iam::aws:policy/AmazonSageMakerPipelinesIntegrations
+
+  # --------------------------------------------------------------------------
+  # IAM-Role für Inferenz-Lambda
+  # --------------------------------------------------------------------------
+  # Braucht:
+  # - CloudWatch Logs Rechte
+  # - sagemaker:StartPipelineExecution für deine Pipelines
+  # 
+
+  InferenceLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-dev-inference-lambda-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        # CloudWatch Logs Basic Execution
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: !Sub '${ProjectName}-dev-inference-start-pipeline'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sagemaker:StartPipelineExecution
+                Resource: !Sub 'arn:aws:sagemaker:${AWS::Region}:${AWS::AccountId}:pipeline/*'
+
+  # --------------------------------------------------------------------------
+  # Lambda-Funktion: startet die Inferenz-Pipeline
+  # --------------------------------------------------------------------------
+  # Inline-Code via ZipFile (Node.js & Python werden offiziell unterstützt).
+
+  InferenceLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${ProjectName}-dev-inference-trigger'
+      Runtime: python3.11
+      Handler: index.handler
+      Role: !GetAtt InferenceLambdaRole.Arn
+      Timeout: 60
+      Environment:
+        Variables:
+          PIPELINE_NAME: !Ref InferencePipelineName
+      Code:
+        ZipFile: |
+          import os
+          import json
+          import boto3
+
+          sm = boto3.client("sagemaker")
+
+          def handler(event, context):
+              pipeline_name = os.environ.get("PIPELINE_NAME")
+              if not pipeline_name:
+                  raise ValueError("PIPELINE_NAME env var not set")
+
+              # Smoke-Mode: wenn dry_run=True, nur prüfen, dass wir soweit kommen
+              if isinstance(event, dict) and event.get("dry_run"):
+                  return {
+                      "statusCode": 200,
+                      "body": json.dumps({
+                          "message": "Smoke test OK (no pipeline started)"
+                      })
+                  }
+
+              # Normalmodus: Inferenz-Pipeline ausführen
+              response = sm.start_pipeline_execution(
+                  PipelineName=pipeline_name
+              )
+
+              return {
+                  "statusCode": 200,
+                  "body": json.dumps({
+                      "PipelineExecutionArn": response.get("PipelineExecutionArn")
+                  })
+              }
+
+
+  # --------------------------------------------------------------------------
+  # EventBridge-Rule: wöchentlicher Trigger für Inferenz-Lambda
+  # --------------------------------------------------------------------------
+  # EventBridge kann direkt Lambda aufrufen; für Lambda brauchst du
+  # KEIN RoleArn im Target, sondern eine Lambda::Permission Resource.
+
+  InferenceScheduleRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub '${ProjectName}-dev-inference-weekly'
+      Description: 'Wöchentlicher Trigger für Inferenz-Pipeline (Dev)'
+      ScheduleExpression: 'cron(0 5 ? * MON *)'   # jeden Montag 05:00 UTC
+      State: ENABLED
+      Targets:
+        - Id: InferenceLambdaTarget
+          Arn: !GetAtt InferenceLambdaFunction.Arn
+
+  # EventBridge darf Lambda aufrufen
+  InferenceLambdaPermissionForEvents:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref InferenceLambdaFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt InferenceScheduleRule.Arn
+
+Outputs:
+  DevDataBucketName:
+    Description: Name des Dev-Datenbuckets
+    Value: !Ref DevDataBucket
+
+  MlflowArtifactsBucketName:
+    Description: Name des MLflow-Artefakt-Buckets
+    Value: !Ref MlflowArtifactsBucket
+
+  DevCodeRepoName:
+    Description: Name des CodeCommit-Repositories für Dev
+    Value: !GetAtt DevCodeRepo.Name
+
+  SageMakerPipelineRoleArn:
+    Description: Execution Role für SageMaker-Pipelines (Dev)
+    Value: !GetAtt SageMakerPipelineRole.Arn
+
+  InferenceLambdaArn:
+    Description: ARN der Inferenz-Trigger-Lambda (Dev)
+    Value: !GetAtt InferenceLambdaFunction.Arn
+
+  InferenceScheduleRuleName:
+    Description: Name der EventBridge-Rule für wöchentliche Inferenz (Dev)
+    Value: !Ref InferenceScheduleRule
+
